@@ -3,16 +3,21 @@
     "output_img_folder": "F:/annotate/annotated_images",
     "output_label_folder": "F:/annotate/annotated_labels",
     "delete_folder": "F:/annotate/DELETE",
-    "delete_mode": false,
+    "delete_mode": true,
     "model_path_detect": "cowcatcherV15.pt",
     "model_path_seg": "yolo11x-seg.pt",
-    "keys": {
+    "keys_annotate": {
         "save_next": "s",
         "skip": "space",
-        "delete": "t",
-        "undo": "x",
-        "reset_view": "r",
+        "delete": "Delete",
+        "undo": "z"
+    },
+    "keys_control": {
+        "save_next": "d",
         "prev": "a",
-        "reject": "e"
-    }
+        "reject": "e",
+        "delete": "t",
+        "reset_view": "r"
+    },
+    "move_skip": true
 }

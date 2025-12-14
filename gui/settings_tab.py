@@ -8,8 +8,8 @@ class SettingsTab(ctk.CTkFrame):
     def __init__(self, parent, config):
         super().__init__(parent)
         self.config = config
-        self.entries = {}      # Voor paden
-        self.key_entries = {}  # Voor sneltoetsen (NIEUW)
+        self.entries = {}       # Voor paden
+        self.key_entries = {}   # Voor sneltoetsen
         self.class_widgets = [] 
         
         # Hoofd container (Scrollbaar)
@@ -19,6 +19,31 @@ class SettingsTab(ctk.CTkFrame):
         self.setup_ui()
         
     def setup_ui(self):
+        # --- SECTIE 0: ALGEMEEN ---
+        self.add_section_header("⚙️ Algemeen")
+        
+        # 1. Checkbox: Bewerken (Delete/Approve) standaard ingeschakeld (Bestaand)
+        self.chk_delete_mode = ctk.CTkCheckBox(
+            self.scroll, 
+            text="Verplaats afbeelding na OPSLAAN (Save) naar delete map"
+        )
+        if self.config.get("delete_mode", False):
+            self.chk_delete_mode.select()
+        else:
+            self.chk_delete_mode.deselect()
+        self.chk_delete_mode.pack(anchor="w", padx=20, pady=5)
+
+        # 2. Checkbox: Move on Skip (NIEUW)
+        self.chk_move_skip = ctk.CTkCheckBox(
+            self.scroll, 
+            text="Verplaats afbeelding ook na OVERSLAAN (Skip) naar delete map"
+        )
+        if self.config.get("move_skip", False):
+            self.chk_move_skip.select()
+        else:
+            self.chk_move_skip.deselect()
+        self.chk_move_skip.pack(anchor="w", padx=20, pady=5)
+
         # --- SECTIE 1: MAPPEN ---
         self.add_section_header("📁 Mappen Structuur")
         self.add_path_selector("Input Map (Afbeeldingen):", "input_folder")
@@ -31,26 +56,35 @@ class SettingsTab(ctk.CTkFrame):
         self.add_path_selector("Detectie Model (Box):", "model_path_detect", is_file=True)
         self.add_path_selector("Segmentatie Model (Mask):", "model_path_seg", is_file=True)
         
-        # --- SECTIE 3: SNELTOETSEN (NIEUW) ---
+        # --- SECTIE 3: SNELTOETSEN ---
         self.add_section_header("⌨️ Sneltoetsen")
         
-        # Zorg dat de keys dictionary bestaat
-        if 'keys' not in self.config:
-            self.config['keys'] = {
-                "save_next": "s", "skip": "space", "delete": "Delete", 
-                "undo": "z", "reset_view": "r", "prev": "a", "reject": "e"
+        # Defaults
+        if 'keys_annotate' not in self.config:
+            self.config['keys_annotate'] = {
+                "save_next": "s", "skip": "space", "delete": "Delete", "undo": "z"
             }
-            
-        # Maak invulvelden (Label | Entry)
-        self.add_key_entry("Opslaan / Goedkeuren:", "save_next")
-        self.add_key_entry("Overslaan (Skip):", "skip")
-        self.add_key_entry("Vorige Afbeelding:", "prev")
-        self.add_key_entry("Verwijderen (Delete):", "delete")
-        self.add_key_entry("Afkeuren (Control):", "reject")
-        self.add_key_entry("Ongedaan maken (Undo):", "undo")
-        self.add_key_entry("Reset View (Zoom):", "reset_view")
+        if 'keys_control' not in self.config:
+            self.config['keys_control'] = {
+                "save_next": "s", "prev": "a", "reject": "e", "delete": "t", "reset_view": "r"
+            }
+
+        # Annoteren
+        ctk.CTkLabel(self.scroll, text="Tabblad: Annoteren", font=("Arial", 14, "bold"), text_color="gray").pack(anchor="w", padx=20, pady=(10, 2))
+        self.add_key_entry("Opslaan & Volgende:", "save_next", category="keys_annotate")
+        self.add_key_entry("Overslaan (Skip):", "skip", category="keys_annotate")
+        self.add_key_entry("Verwijderen (Delete):", "delete", category="keys_annotate")
+        self.add_key_entry("Ongedaan maken (Undo):", "undo", category="keys_annotate")
+
+        # Controleren
+        ctk.CTkLabel(self.scroll, text="Tabblad: Controleren", font=("Arial", 14, "bold"), text_color="gray").pack(anchor="w", padx=20, pady=(15, 2))
+        self.add_key_entry("Volgende / Goedkeuren:", "save_next", category="keys_control")
+        self.add_key_entry("Vorige Afbeelding:", "prev", category="keys_control")
+        self.add_key_entry("Afkeuren (Reject):", "reject", category="keys_control")
+        self.add_key_entry("Verwijderen (Definitief):", "delete", category="keys_control")
+        self.add_key_entry("Reset View:", "reset_view", category="keys_control")
         
-        ctk.CTkLabel(self.scroll, text="(Herstart vereist na wijzigen toetsen)", text_color="gray", font=("Arial", 10)).pack(pady=2)
+        ctk.CTkLabel(self.scroll, text="(Herstart vereist na wijzigen toetsen)", text_color="gray", font=("Arial", 10)).pack(pady=5)
 
         # --- SECTIE 4: KLASSEN EDITOR ---
         self.add_section_header("🏷️ Klassen & Kleuren")
@@ -85,19 +119,17 @@ class SettingsTab(ctk.CTkFrame):
         cmd = lambda: self.browse_path(entry, is_file)
         ctk.CTkButton(frame, text="...", width=40, command=cmd).pack(side="right", padx=5)
 
-    def add_key_entry(self, label_text, key_key):
-        """Voegt een rij toe voor een sneltoets"""
+    def add_key_entry(self, label_text, key_key, category="keys"):
         frame = ctk.CTkFrame(self.scroll, fg_color="transparent")
         frame.pack(fill="x", pady=2)
-        
         ctk.CTkLabel(frame, text=label_text, width=200, anchor="w").pack(side="left", padx=5)
         
-        current_val = self.config['keys'].get(key_key, "")
+        current_val = self.config.get(category, {}).get(key_key, "")
         entry = ctk.CTkEntry(frame, width=100)
         entry.insert(0, current_val)
         entry.pack(side="left", padx=5)
         
-        self.key_entries[key_key] = entry
+        self.key_entries[(category, key_key)] = entry
 
     def browse_path(self, entry_widget, is_file):
         if is_file:
@@ -155,18 +187,25 @@ class SettingsTab(ctk.CTkFrame):
 
     # --- OPSLAAN ---
     def save_settings(self):
-        # 1. Paden opslaan
+        # 1. Checkboxes
+        self.config['delete_mode'] = bool(self.chk_delete_mode.get())
+        self.config['move_skip'] = bool(self.chk_move_skip.get()) # NIEUW
+
+        # 2. Paden
         for key, entry in self.entries.items():
             self.config[key] = entry.get()
             
-        # 2. Sneltoetsen opslaan (NIEUW)
-        if 'keys' not in self.config: self.config['keys'] = {}
-        for key_key, entry in self.key_entries.items():
+        # 3. Sneltoetsen
+        if 'keys_annotate' not in self.config: self.config['keys_annotate'] = {}
+        if 'keys_control' not in self.config: self.config['keys_control'] = {}
+        
+        for (category, key_key), entry in self.key_entries.items():
             val = entry.get().strip()
-            if val: # Alleen opslaan als niet leeg
-                self.config['keys'][key_key] = val
+            if val: 
+                if category not in self.config: self.config[category] = {}
+                self.config[category][key_key] = val
 
-        # 3. Klassen opslaan
+        # 4. Klassen
         new_classes = []
         for widget in self.class_widgets:
             new_classes.append({
@@ -176,11 +215,18 @@ class SettingsTab(ctk.CTkFrame):
             })
         self.config['classes'] = new_classes
         
-        # 4. Wegschrijven
+        # 5. Wegschrijven
         try:
+            if 'keys' in self.config: del self.config['keys']
+
             settings_to_save = {k: v for k, v in self.config.items() if k != 'classes'}
-            with open('config/settings.json', 'w') as f: json.dump(settings_to_save, f, indent=4)
-            with open('config/classes.json', 'w') as f: json.dump(self.config['classes'], f, indent=4)
+            
+            with open('config/settings.json', 'w') as f: 
+                json.dump(settings_to_save, f, indent=4)
+                
+            with open('config/classes.json', 'w') as f: 
+                json.dump(self.config['classes'], f, indent=4)
+                
             messagebox.showinfo("Succes", "Instellingen opgeslagen!\nHerstart de applicatie om wijzigingen toe te passen.")
         except Exception as e:
             messagebox.showerror("Fout", f"Kon niet opslaan: {e}")
