@@ -1,0 +1,17 @@
+[
+    {
+        "id": 0,
+        "name": "mounting",
+        "color": "#FF0000"
+    },
+    {
+        "id": 1,
+        "name": "cow",
+        "color": "#00FF00"
+    },
+    {
+        "id": 2,
+        "name": "person",
+        "color": "#0000FF"
+    }
+]

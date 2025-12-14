@@ -1,0 +1,18 @@
+{
+    "input_folder": "F:/annotate/annotate",
+    "output_img_folder": "F:/annotate/annotated_images",
+    "output_label_folder": "F:/annotate/annotated_labels",
+    "delete_folder": "F:/annotate/DELETE",
+    "delete_mode": false,
+    "model_path_detect": "cowcatcherV15.pt",
+    "model_path_seg": "yolo11x-seg.pt",
+    "keys": {
+        "save_next": "s",
+        "skip": "space",
+        "delete": "t",
+        "undo": "x",
+        "reset_view": "r",
+        "prev": "a",
+        "reject": "e"
+    }
+}
