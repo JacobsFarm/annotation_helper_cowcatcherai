@@ -6,329 +6,398 @@ from PIL import Image, ImageTk
 import os
 import shutil
 import numpy as np
-from logic.model_handler import ModelHandler
+from ultralytics import YOLO 
 
 class AnnotateSegTab(ctk.CTkFrame):
     def __init__(self, parent, config):
         super().__init__(parent)
         self.config = config
         
-        # --- DATA & STATE ---
+        # --- INSTELLINGEN ---
+        self.input_folder = config.get('input_folder', 'input')
+        self.output_img = config.get('output_img_folder', 'output/images')
+        self.output_lbl = config.get('output_label_folder', 'output/labels')
+        
+        model_path = config.get('model_path_seg', 'yolov11m-seg.pt')
+        try:
+            self.model = YOLO(model_path)
+        except:
+            print(f"Kon model niet laden: {model_path}")
+            self.model = None
+        
+        # State
         self.image_files = []
         self.current_index = 0
-        self.current_cv_image = None
-        self.current_path = None  # Nieuw: pad onthouden voor refresh
-        self.annotations = []
+        self.cv_img = None
+        self.polygon_points = []
+        self.selected_point_idx = None
         
-        # Schaling
+        # Zoom & Pan variabelen
         self.scale = 1.0
-        self.off_x = 0
-        self.off_y = 0
-        
-        # Segmentatie State
-        self.current_points = []
-        self.draw_mode = "polygon" 
-        
-        # Logic laden
-        self.model_handler = ModelHandler(config)
-        
-        # UI & Shortcuts
+        self.offset = [0, 0]     # [x, y] offset op het canvas
+        self.fit_to_screen = True # Start altijd passend in scherm
+        self.is_panning = False  # Is de spatiebalk ingedrukt?
+        self.is_dragging_pan = False # Zijn we daadwerkelijk aan het slepen?
+        self.pan_start = (0, 0)  # Startpunt van slepen
+
+        # UI Opbouw
         self.setup_ui()
-        self.setup_shortcuts()
-        
-        # Start laden
-        self.after(100, self.refresh_file_list)
+        self.after(100, self.refresh_list)
 
     def setup_ui(self):
-        self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
-        keys = self.config.get('keys_annotate', {"save_next": "s", "skip": "space", "delete": "Delete", "undo": "z"})
-
-        # --- TOOLBAR (Links) ---
-        self.frame_tools = ctk.CTkFrame(self, width=200)
-        self.frame_tools.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self.canvas = tk.Canvas(self, bg="#202020", highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
         
-        ctk.CTkLabel(self.frame_tools, text="SEGMENTATIE TOOLS", font=("Arial", 16, "bold"), text_color="#3498db").pack(pady=10)
-
-        # AI Instellingen
-        self.var_use_ai = ctk.BooleanVar(value=True)
-        self.switch_ai = ctk.CTkSwitch(self.frame_tools, text="Auto AI (Dual Model)", variable=self.var_use_ai)
-        self.switch_ai.pack(pady=5, padx=10, anchor="w")
+        # --- EVENTS ---
+        # Muis interacties
+        self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
         
-        # 1. Crop Expansie
-        ctk.CTkLabel(self.frame_tools, text="Crop Expansie (%)").pack(pady=(10,0))
-        self.slider_expand = ctk.CTkSlider(self.frame_tools, from_=0, to=0.5, number_of_steps=10)
-        self.slider_expand.set(0.2)
-        self.slider_expand.pack(pady=2)
-
-        # 2. NIEUW: Min Confidence Slider
-        self.lbl_conf = ctk.CTkLabel(self.frame_tools, text="Min Confidence: 0.30")
-        self.lbl_conf.pack(pady=(10,0))
-        
-        self.slider_conf = ctk.CTkSlider(self.frame_tools, from_=0.0, to=1.0, number_of_steps=20, command=self.update_conf_label)
-        self.slider_conf.set(0.3)
-        self.slider_conf.pack(pady=2)
-
-        # 3. NIEUW: Max Masks Slider
-        self.lbl_max_masks = ctk.CTkLabel(self.frame_tools, text="Max Masks: 1")
-        self.lbl_max_masks.pack(pady=(10,0))
-        
-        self.slider_max_masks = ctk.CTkSlider(self.frame_tools, from_=1, to=10, number_of_steps=9, command=self.update_max_masks_label)
-        self.slider_max_masks.set(1)
-        self.slider_max_masks.pack(pady=2)
-
-        # 4. NIEUW: Refresh Knop
-        ctk.CTkButton(self.frame_tools, text="Refresh Prediction", fg_color="#555555", command=self.run_ai_prediction).pack(pady=10, padx=10, fill="x")
-
-        ctk.CTkLabel(self.frame_tools, text="L-Click: Punt zetten\nR-Click: Afronden", font=("Arial", 11), text_color="gray").pack(pady=15)
-
-        # Actie Knoppen
-        ctk.CTkButton(self.frame_tools, text=f"Save & Next ({keys.get('save_next', 'S').upper()})", fg_color="green", command=self.save_and_next).pack(pady=15, padx=10, fill="x")
-        ctk.CTkButton(self.frame_tools, text=f"Skip ({keys.get('skip', 'Space').upper()})", fg_color="orange", command=self.skip_image).pack(pady=5, padx=10, fill="x")
-        ctk.CTkButton(self.frame_tools, text=f"Delete ({keys.get('delete', 'Del').upper()})", fg_color="red", command=self.delete_image).pack(pady=5, padx=10, fill="x")
-        ctk.CTkButton(self.frame_tools, text=f"Undo ({keys.get('undo', 'Z').upper()})", fg_color="gray", command=self.undo).pack(pady=20, padx=10, fill="x")
-        
-        ctk.CTkLabel(self.frame_tools, text="KLASSE").pack(pady=(10,5))
-        self.combo_classes = ctk.CTkOptionMenu(self.frame_tools, values=[c['name'] for c in self.config['classes']])
-        self.combo_classes.pack(padx=10)
-
-        # --- CANVAS (Midden) ---
-        self.frame_canvas = ctk.CTkFrame(self)
-        self.frame_canvas.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        
-        self.canvas = tk.Canvas(self.frame_canvas, bg="#202020", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-        
-        self.canvas.bind("<Button-1>", self.on_left_click)
+        # Rechtermuisknop om punten te verwijderen
         self.canvas.bind("<Button-3>", self.on_right_click)
-        self.canvas.bind("<Configure>", lambda e: self.redraw())
-        self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
+        
+        # Window resize
+        self.canvas.bind("<Configure>", self.on_resize)
 
-    def update_conf_label(self, value):
-        self.lbl_conf.configure(text=f"Min Confidence: {value:.2f}")
+        # ZOOM: Ctrl + Scroll (Windows/Linux)
+        # Windows gebruikt <MouseWheel>, Linux <Button-4/5>
+        self.canvas.bind("<Control-MouseWheel>", self.on_zoom) 
+        self.canvas.bind("<Control-Button-4>", self.on_zoom) # Linux scroll up
+        self.canvas.bind("<Control-Button-5>", self.on_zoom) # Linux scroll down
 
-    def update_max_masks_label(self, value):
-        self.lbl_max_masks.configure(text=f"Max Masks: {int(value)}")
-
-    def setup_shortcuts(self):
+        # PAN: Spatiebalk logic
+        # We moeten binden aan het root window zodat spatie overal werkt
         root = self.winfo_toplevel()
-        keys = self.config.get('keys_annotate', {})
+        root.bind("<KeyPress-space>", self.start_pan_mode)
+        root.bind("<KeyRelease-space>", self.stop_pan_mode)
+        root.bind("<Return>", lambda e: self.save_and_next())
 
-        def if_active(func):
-            def wrapper(event=None):
-                if self.winfo_viewable():
-                    func()
-            return wrapper
-
-        k_save = keys.get("save_next", "s")
-        if k_save:
-            root.bind(f"<{k_save.lower()}>", if_active(self.save_and_next))
-            root.bind(f"<{k_save.upper()}>", if_active(self.save_and_next))
+        # Knoppenbalk
+        frame_controls = ctk.CTkFrame(self, height=50)
+        frame_controls.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
         
-        k_skip = keys.get("skip", "space")
-        if k_skip == "space": root.bind("<space>", if_active(self.skip_image))
-        elif k_skip: root.bind(f"<{k_skip}>", if_active(self.skip_image))
-        
-        k_undo = keys.get("undo", "z")
-        if k_undo:
-             root.bind(f"<{k_undo.lower()}>", if_active(self.undo))
-             root.bind(f"<{k_undo.upper()}>", if_active(self.undo))
-             
-        k_del = keys.get("delete", "Delete")
-        if k_del: root.bind(f"<{k_del}>", if_active(self.delete_image))
+        self.lbl_info = ctk.CTkLabel(frame_controls, text="Laden...")
+        self.lbl_info.pack(side="left", padx=20)
 
-    # --- LOGICA ---
-    def refresh_file_list(self):
-        folder = self.config.get('input_folder', '')
-        if not os.path.exists(folder): return
-        self.image_files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
-        if self.image_files: self.load_image()
-        else: 
-            self.canvas.delete("all")
-            self.canvas.create_text(400, 300, text="Geen afbeeldingen!", fill="white")
+        ctk.CTkButton(frame_controls, text="Save & Next (Enter)", command=self.save_and_next, fg_color="green").pack(side="right", padx=10)
+        ctk.CTkButton(frame_controls, text="Reset AI", command=self.run_ai, fg_color="#444").pack(side="right", padx=10)
+        
+        # Instructie labeltje
+        ctk.CTkLabel(frame_controls, text="[Ctrl+Scroll]: Zoom | [Spatie+Sleep]: Pan", text_color="gray").pack(side="right", padx=20)
+
+    # --- LIST & LOADING ---
+    def refresh_list(self):
+        if os.path.exists(self.input_folder):
+            self.image_files = [f for f in os.listdir(self.input_folder) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+            if self.image_files:
+                self.load_image()
+            else:
+                self.lbl_info.configure(text="Geen afbeeldingen!")
 
     def load_image(self):
-        filename = self.image_files[self.current_index]
-        self.current_path = os.path.join(self.config['input_folder'], filename)
-        
-        self.current_cv_image = cv2.imread(self.current_path)
-        if self.current_cv_image is not None:
-            self.current_cv_image = cv2.cvtColor(self.current_cv_image, cv2.COLOR_BGR2RGB)
-        
-        self.annotations = []
-        self.current_points = []
-        
-        # Directe aanroep vervangen door flexibele functie
-        self.run_ai_prediction()
+        path = os.path.join(self.input_folder, self.image_files[self.current_index])
+        self.cv_img = cv2.imread(path)
+        if self.cv_img is not None:
+            self.cv_img = cv2.cvtColor(self.cv_img, cv2.COLOR_BGR2RGB)
+            self.lbl_info.configure(text=f"{self.image_files[self.current_index]} ({self.current_index+1}/{len(self.image_files)})")
+            
+            # Reset zoom bij nieuwe foto
+            self.fit_to_screen = True 
+            
+            self.run_ai()
+        else:
+            print(f"Fout laden: {path}")
 
-    def run_ai_prediction(self):
-        """Voert AI uit en filtert op basis van sliders"""
-        if not self.var_use_ai.get() or self.current_cv_image is None:
-            self.redraw()
-            return
+    def run_ai(self):
+        if self.model is None or self.cv_img is None: return
+        results = self.model(self.cv_img, verbose=False)
+        self.polygon_points = []
+        if results and results[0].masks:
+            masks = results[0].masks.xy
+            if len(masks) > 0:
+                poly = masks[0]
+                if len(poly) > 60: 
+                    indices = np.linspace(0, len(poly)-1, 50, dtype=int)
+                    poly = poly[indices]
+                self.polygon_points = poly.tolist()
+        self.draw()
 
-        # Oude handmatige annotaties wissen als we refreshen (optioneel, maar logisch bij 'Auto AI')
-        self.annotations = []
-        
-        try:
-            # 1. Haal alle predictions op
-            preds = self.model_handler.predict_advanced_dual(self.current_path, self.slider_expand.get())
-            
-            # 2. Filteren op Confidence
-            min_conf = self.slider_conf.get()
-            filtered_preds = []
-            
-            for p in preds:
-                # Als 'score' of 'conf' beschikbaar is in de prediction dict
-                score = p.get('score', p.get('conf', 1.0)) 
-                if score >= min_conf:
-                    filtered_preds.append(p)
-            
-            # 3. Sorteren op score (hoogste eerst)
-            filtered_preds.sort(key=lambda x: x.get('score', x.get('conf', 0)), reverse=True)
-            
-            # 4. Beperken tot Max Masks
-            max_masks = int(self.slider_max_masks.get())
-            final_preds = filtered_preds[:max_masks]
-            
-            self.annotations.extend(final_preds)
-            
-        except Exception as e:
-            print(f"AI Error: {e}")
-        
-        self.redraw()
+    # --- DRAWING ---
+    def on_resize(self, event):
+        # Alleen hertekenen als we in "fit mode" zijn, of gewoon update
+        if self.fit_to_screen:
+            self.draw()
 
-    def redraw(self):
+    def draw(self):
         self.canvas.delete("all")
-        if self.current_cv_image is None: return
-        
-        h_img, w_img = self.current_cv_image.shape[:2]
+        if self.cv_img is None: return
+
+        h_img, w_img = self.cv_img.shape[:2]
         w_can = self.canvas.winfo_width()
         h_can = self.canvas.winfo_height()
         
-        if w_can < 10: return
+        if w_can <= 1: return 
+
+        # Bereken schaal en offset
+        if self.fit_to_screen:
+            # Automatisch passend maken
+            self.scale = min(w_can/w_img, h_can/h_img) * 0.95
+            nw, nh = int(w_img * self.scale), int(h_img * self.scale)
+            ox, oy = (w_can - nw)//2, (h_can - nh)//2
+            self.offset = [ox, oy]
+        else:
+            # Gebruik huidige zoom/pan waarden (worden aangepast door scroll/drag)
+            pass
+
+        # Afbeelding tekenen (alleen het zichtbare deel voor performance zou beter zijn, maar dit is makkelijker)
+        # We gebruiken warpAffine voor zoom/pan als het heel groot wordt, 
+        # maar voor eenvoud resizen we gewoon. Let op: bij extreme zoom kan dit traag worden.
+        # Voor deze implementatie gebruiken we de simpele resize methode:
         
-        self.scale = min(w_can / w_img, h_can / h_img) * 0.95
-        new_w, new_h = int(w_img * self.scale), int(h_img * self.scale)
-        self.off_x, self.off_y = (w_can - new_w) // 2, (h_can - new_h) // 2
+        nw = int(w_img * self.scale)
+        nh = int(h_img * self.scale)
         
-        img_res = cv2.resize(self.current_cv_image, (new_w, new_h))
-        self.tk_img = ImageTk.PhotoImage(Image.fromarray(img_res))
-        self.canvas.create_image(self.off_x, self.off_y, image=self.tk_img, anchor="nw")
+        # Om bugs bij extreme zoom te voorkomen (ImageTk limiet), cappen we de grootte of gebruiken we een crop.
+        # Voor nu houden we het simpel:
+        if nw < 1 or nh < 1: return
+
+        # PIL image maken
+        pil_img = Image.fromarray(self.cv_img)
+        pil_img = pil_img.resize((nw, nh), Image.Resampling.NEAREST) # Nearest is sneller
+        self.tk_img = ImageTk.PhotoImage(pil_img)
         
-        # Annotaties tekenen
-        for ann in self.annotations:
-            col = self.get_color(ann['class_id'])
-            if ann['type'] == 'polygon':
-                pts = []
-                for x, y in ann['points']:
-                    pts.extend([x * self.scale + self.off_x, y * self.scale + self.off_y])
-                if len(pts) >= 4:
-                    self.canvas.create_polygon(pts, outline=col, fill='', width=2)
+        self.canvas.create_image(self.offset[0], self.offset[1], image=self.tk_img, anchor="nw")
+
+        # Polygon tekenen
+        if len(self.polygon_points) > 1:
+            display_pts = []
+            ox, oy = self.offset
+            for px, py in self.polygon_points:
+                cx = px * self.scale + ox
+                cy = py * self.scale + oy
+                display_pts.extend([cx, cy])
             
-            elif ann['type'] == 'bbox':
-                x1, y1, x2, y2 = ann['coords']
-                self.canvas.create_rectangle(
-                    x1*self.scale+self.off_x, y1*self.scale+self.off_y,
-                    x2*self.scale+self.off_x, y2*self.scale+self.off_y,
-                    outline=col, dash=(2,2))
+            # Lijnen
+            self.canvas.create_polygon(display_pts, outline="#00ff00", fill="", width=2, tags="poly")
+            
+            # Punten (alleen tekenen als ze in beeld zijn, optimalisatie)
+            for i, (px, py) in enumerate(self.polygon_points):
+                cx = px * self.scale + ox
+                cy = py * self.scale + oy
+                
+                # Check of punt binnen canvas valt (beetje marge)
+                if -10 < cx < w_can + 10 and -10 < cy < h_can + 10:
+                    col = "#ff3333" if i == self.selected_point_idx else "#ffff00"
+                    r = 5 if i == self.selected_point_idx else 3
+                    self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r, fill=col, outline="black", tags=f"pt_{i}")
 
-        # Huidige punten tekenen
-        if self.current_points:
-            pts = []
-            for x, y in self.current_points:
-                cx, cy = x * self.scale + self.off_x, y * self.scale + self.off_y
-                pts.extend([cx, cy])
-                self.canvas.create_oval(cx-2, cy-2, cx+2, cy+2, fill="yellow")
-            if len(pts) >= 4:
-                self.canvas.create_line(pts, fill="yellow", width=1)
+            self.canvas.tag_raise("pt_")
 
-    # --- INTERACTIE ---
-    def on_left_click(self, event):
-        ix = (event.x - self.off_x) / self.scale
-        iy = (event.y - self.off_y) / self.scale
-        self.current_points.append([ix, iy])
-        self.redraw()
+    # --- ZOOM & PAN LOGICA ---
+    
+    def start_pan_mode(self, event):
+        self.is_panning = True
+        self.canvas.configure(cursor="hand2") # Handje cursor
+
+    def stop_pan_mode(self, event):
+        self.is_panning = False
+        self.is_dragging_pan = False
+        self.canvas.configure(cursor="arrow") # Terug naar pijl
+
+    def on_zoom(self, event):
+        """Zoom in op de muispositie"""
+        if self.cv_img is None: return
+
+        # Bepaal scroll richting
+        if event.num == 5 or event.delta < 0:
+            factor = 0.9 # Uitzoomen
+        else:
+            factor = 1.1 # Inzoomen
+
+        # Muispositie op canvas
+        mouse_x = self.canvas.canvasx(event.x)
+        mouse_y = self.canvas.canvasy(event.y)
+
+        # Bereken waar de muis is relatief aan de afbeelding (voor de zoom)
+        # Oude offset
+        ox, oy = self.offset
+        
+        # Update schaal
+        new_scale = self.scale * factor
+        
+        # Limiteer zoom (niet te klein, niet te bizar groot)
+        if new_scale < 0.1 or new_scale > 50: return
+
+        # De magie: verschuif offset zodat muis op zelfde plek in afbeelding blijft
+        self.offset[0] = mouse_x - (mouse_x - ox) * factor
+        self.offset[1] = mouse_y - (mouse_y - oy) * factor
+        
+        self.scale = new_scale
+        self.fit_to_screen = False # We zitten nu in manual mode
+        self.draw()
+
+    # --- CLICK & DRAG ---
+# --- CLICK & DRAG ---
+    def on_click(self, event):
+        # Optie 1: Expliciete Pan-modus met Spatiebalk (bestaande functionaliteit behouden)
+        if self.is_panning:
+            self.is_dragging_pan = True
+            self.pan_start = (event.x, event.y)
+            self.canvas.configure(cursor="fleur")
+            return
+
+        # --- LOGICA VOOR PUNTEN/LIJNEN/ACHTERGROND ---
+        click_pt = np.array([event.x, event.y])
+        ox, oy = self.offset
+        
+        # A. Bestaand punt? (Drempelwaarde hardcoded: 15px)
+        best_dist = 15
+        best_idx = None
+        for i, (px, py) in enumerate(self.polygon_points):
+            cx = px * self.scale + ox
+            cy = py * self.scale + oy
+            dist = ((cx - event.x)**2 + (cy - event.y)**2)**0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        
+        if best_idx is not None:
+            self.selected_point_idx = best_idx
+            self.draw()
+            return # We hebben een punt, dus we gaan NIET pannen
+
+        # B. Lijn klik? (Drempelwaarde hardcoded: 10px)
+        if len(self.polygon_points) > 1:
+            line_threshold = 10
+            for i in range(len(self.polygon_points)):
+                p1_idx = i
+                p2_idx = (i + 1) % len(self.polygon_points)
+                p1_raw = self.polygon_points[p1_idx]
+                p2_raw = self.polygon_points[p2_idx]
+                
+                p1 = np.array([p1_raw[0] * self.scale + ox, p1_raw[1] * self.scale + oy])
+                p2 = np.array([p2_raw[0] * self.scale + ox, p2_raw[1] * self.scale + oy])
+                
+                p1_to_p2 = p2 - p1
+                p1_to_click = click_pt - p1
+                len_sq = np.dot(p1_to_p2, p1_to_p2)
+                
+                dist_to_line = float('inf')
+                if len_sq > 0:
+                    t = max(0, min(1, np.dot(p1_to_click, p1_to_p2) / len_sq))
+                    proj = p1 + t * p1_to_p2
+                    dist_to_line = np.linalg.norm(click_pt - proj)
+                
+                if dist_to_line < line_threshold:
+                    # Nieuw punt toevoegen op de lijn
+                    new_img_x = (event.x - ox) / self.scale
+                    new_img_y = (event.y - oy) / self.scale
+                    self.polygon_points.insert(p1_idx + 1, [new_img_x, new_img_y])
+                    self.selected_point_idx = p1_idx + 1
+                    self.draw()
+                    return # We hebben een lijn, dus we gaan NIET pannen
+
+        # C. ACHTERGROND KLIK -> AUTOMATISCH PANNEN
+        # Als we hier zijn, is er niet op een punt en niet op een lijn geklikt.
+        # We activeren de sleep-modus.
+        self.selected_point_idx = None
+        self.is_dragging_pan = True
+        self.pan_start = (event.x, event.y)
+        self.canvas.configure(cursor="fleur")
+        self.draw()
+
+    def on_drag(self, event):
+        # 1. Panning logica
+        # AANGEPAST: We checken alleen 'is_dragging_pan'. 
+        # Dit staat aan als we spatie gebruiken OF als we op de achtergrond klikten.
+        if self.is_dragging_pan:
+            dx = event.x - self.pan_start[0]
+            dy = event.y - self.pan_start[1]
+            
+            self.offset[0] += dx
+            self.offset[1] += dy
+            
+            self.pan_start = (event.x, event.y)
+            self.fit_to_screen = False
+            self.draw()
+            return
+
+        # 2. Punt verplaatsen logica
+        if self.selected_point_idx is not None:
+            ox, oy = self.offset
+            img_x = (event.x - ox) / self.scale
+            img_y = (event.y - oy) / self.scale
+            self.polygon_points[self.selected_point_idx] = [img_x, img_y]
+            self.draw()
+
+    def on_release(self, event):
+        if self.is_dragging_pan:
+            self.is_dragging_pan = False
+            # Alleen cursor terugzetten naar 'hand' als we nog steeds de spatiebalk inhouden,
+            # anders terug naar pijl.
+            if self.is_panning:
+                self.canvas.configure(cursor="hand2")
+            else:
+                self.canvas.configure(cursor="arrow")
+        
+        self.selected_point_idx = None
+
+    def on_release(self, event):
+        if self.is_dragging_pan:
+            self.is_dragging_pan = False
+            if self.is_panning:
+                self.canvas.configure(cursor="hand2")
+        
+        self.selected_point_idx = None
+        # Niet redrawen hier nodig, on_drag deed het al
 
     def on_right_click(self, event):
-        if len(self.current_points) > 2:
-            self.annotations.append({
-                "type": "polygon", 
-                "class_id": self.get_class_id(), 
-                "points": self.current_points,
-                "score": 1.0 # Handmatig is altijd zeker
-            })
-            self.current_points = []
-            self.redraw()
+        """Verwijder punt"""
+        ox, oy = self.offset
+        best_dist = 15
+        best_idx = None
+        for i, (px, py) in enumerate(self.polygon_points):
+            cx = px * self.scale + ox
+            cy = py * self.scale + oy
+            dist = ((cx - event.x)**2 + (cy - event.y)**2)**0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        
+        if best_idx is not None and len(self.polygon_points) > 3:
+            self.polygon_points.pop(best_idx)
+            self.selected_point_idx = None
+            self.draw()
 
-    def get_class_id(self):
-        name = self.combo_classes.get()
-        for c in self.config['classes']:
-            if c['name'] == name: return c['id']
-        return 0
-
-    def get_color(self, cid):
-        for c in self.config['classes']:
-            if c['id'] == cid: return c['color']
-        return "red"
-
-    def undo(self):
-        if self.annotations:
-            self.annotations.pop()
-            self.redraw()
-
-    # --- SAVE ---
     def save_and_next(self):
         if not self.image_files: return
-        fname = self.image_files[self.current_index]
-        base = os.path.splitext(fname)[0]
+        if self.cv_img is None: return
+
+        filename = self.image_files[self.current_index]
+        base_name = os.path.splitext(filename)[0]
         
-        src = os.path.join(self.config['input_folder'], fname)
-        dst = os.path.join(self.config['output_img_folder'], fname)
-        shutil.copy(src, dst)
+        os.makedirs(self.output_img, exist_ok=True)
+        os.makedirs(self.output_lbl, exist_ok=True)
+
+        shutil.copy(os.path.join(self.input_folder, filename), os.path.join(self.output_img, filename))
         
-        label_path = os.path.join(self.config['output_label_folder'], f"{base}.txt")
-        h, w = self.current_cv_image.shape[:2]
+        if self.polygon_points:
+            h, w = self.cv_img.shape[:2]
+            label_path = os.path.join(self.output_lbl, f"{base_name}.txt")
+            with open(label_path, "w") as f:
+                line_parts = ["0"] # Class 0
+                for px, py in self.polygon_points:
+                    nx = max(0.0, min(1.0, px / w))
+                    ny = max(0.0, min(1.0, py / h))
+                    line_parts.append(f"{nx:.6f} {ny:.6f}")
+                f.write(" ".join(line_parts) + "\n")
         
-        with open(label_path, 'w') as f:
-            for ann in self.annotations:
-                cid = ann['class_id']
-                if ann['type'] == 'polygon':
-                    line = f"{cid}"
-                    for px, py in ann['points']:
-                        line += f" {px/w:.6f} {py/h:.6f}"
-                    f.write(line + "\n")
-                elif ann['type'] == 'bbox':
-                     x1, y1, x2, y2 = ann['coords']
-                     cx, cy = ((x1+x2)/2)/w, ((y1+y2)/2)/h
-                     bw, bh = (x2-x1)/w, (y2-y1)/h
-                     f.write(f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
-
-        if self.config.get('delete_mode', False):
-            try: shutil.move(src, os.path.join(self.config['delete_folder'], fname))
-            except: pass
-
-        self.next_img()
-
-    def skip_image(self):
-        if self.config.get('move_skip', False):
-             if not self.image_files: return
-             fname = self.image_files[self.current_index]
-             try: shutil.move(os.path.join(self.config['input_folder'], fname), os.path.join(self.config['delete_folder'], fname))
-             except: pass
-        self.next_img()
-
-    def delete_image(self):
-        if not self.image_files: return
-        fname = self.image_files[self.current_index]
-        try: shutil.move(os.path.join(self.config['input_folder'], fname), os.path.join(self.config['delete_folder'], fname))
-        except: pass
-        self.next_img()
-
-    def next_img(self):
         if self.current_index < len(self.image_files) - 1:
             self.current_index += 1
             self.load_image()
         else:
-            messagebox.showinfo("Klaar", "Alle beelden verwerkt!")
+            messagebox.showinfo("Klaar", "Alle afbeeldingen verwerkt!")
